@@ -1,0 +1,113 @@
+name: Build Arch Linux ARM for Qualcomm Laptops
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison flex libssl-dev make libc6-dev libncurses5-dev \
+            crossbuild-essential-arm64 qemu-user-static arch-install-scripts btrfs-progs fdisk
+
+      - name: Clone Linaro Kernel
+        run: |
+          git clone --depth 1 -b qcom-laptops https://gitlab.com/Linaro/arm64-laptops/linux.git kernel
+
+      - name: Build Kernel (Cross-Compile)
+        run: |
+          cd kernel
+          export ARCH=arm64
+          export CROSS_COMPILE=aarch64-linux-gnu-
+          make qcom_laptops.config defconfig
+          make -j$(nproc) Image modules dtbs
+          cd ..
+
+      - name: Prepare RootFS and Image
+        run: |
+          truncate -s 4G arch-qcom.img
+          
+          sudo fdisk arch-qcom.img <<EOF
+          o
+          n
+          p
+          1
+          
+          +100M
+          t
+          ef
+          n
+          p
+          2
+          
+          
+          w
+          EOF
+
+      - name: Assemble Image (Enhanced with Bootloader & Firmware)
+        run: |
+          DEV=$(sudo losetup --show -fP arch-qcom.img)
+          sudo mkfs.vfat -F32 ${DEV}p1
+          sudo mkfs.ext4 ${DEV}p2
+          
+          mkdir -p mnt
+          sudo mount ${DEV}p2 mnt
+          sudo mkdir -p mnt/boot
+          sudo mount ${DEV}p1 mnt/boot
+          
+          wget http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+          sudo bsdtar -xpf ArchLinuxARM-aarch64-latest.tar.gz -C mnt
+
+          cd kernel
+          sudo make ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=../mnt modules_install
+          sudo cp arch/arm64/boot/Image ../mnt/boot/Image
+          sudo mkdir -p ../mnt/boot/dtbs
+          sudo cp arch/arm64/boot/dts/qcom/*.dtb ../mnt/boot/dtbs/
+          cd ..
+
+          git clone --depth 1 https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git
+          sudo cp -r linux-firmware/qcom mnt/lib/firmware/
+          
+          sudo cp /usr/bin/qemu-aarch64-static mnt/usr/bin/
+          
+          sudo mount --bind /dev mnt/dev
+          sudo mount --bind /proc mnt/proc
+          sudo mount --bind /sys mnt/sys
+
+          sudo chroot mnt /bin/bash <<EOF
+          pacman-key --init
+          pacman-key --populate archlinuxarm
+          
+          pacman -Sy --noconfirm grub efibootmgr
+          
+          
+          grub-install --target=arm64-efi --efi-directory=/boot --bootloader-id=GRUB --removable
+          
+          
+          echo "GRUB_CMDLINE_LINUX_DEFAULT=\"clk_ignore_unused pd_ignore_unused rootwait\"" >> /etc/default/grub
+          grub-mkconfig -o /boot/grub/grub.cfg
+          EOF
+
+         
+          sudo umount -l mnt/sys mnt/proc mnt/dev
+          sudo umount -l mnt/boot
+          sudo umount -l mnt
+          sudo losetup -d ${DEV}
+
+      - name: Compress Image
+        run: |
+          zstd --rm arch-qcom.img -o arch-linux-arm-qcom.img.zst
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arch-arm-qcom-image
+          path: arch-linux-arm-qcom.img.zst
