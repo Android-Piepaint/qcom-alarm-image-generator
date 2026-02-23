@@ -16,7 +16,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y bc bison flex libssl-dev make libc6-dev libncurses5-dev \
-            crossbuild-essential-arm64 qemu-user-static arch-install-scripts btrfs-progs fdisk
+            crossbuild-essential-arm64 qemu-user-static arch-install-scripts btrfs-progs fdisk \
+            libarchive-tools dosfstools
 
       - name: Clone Linaro Kernel
         run: |
